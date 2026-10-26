@@ -137,14 +137,15 @@ individuals <- read_csv(paste0(local.data,"/Kent_morpho_nest_ind/SAVS_dataset_ba
   # Here we assume that the birds that have been are the most recent birds to be using their specific combos 
   # This would break down if any combos have been re-used while a bird is still alive, or if this analysis is performed again in the future
   # So check the data 
-  filter(birth_year == max(birth_year))
+  filter(banding_date == max(banding_date))
 
-br.survey.ex <- br.survey %>% merge(individuals, by.x = "likely_band", by.y = "adult_color") %>%
-  arrange(desc(banding_date)) %>% mutate(likely_band = factor(likely_band, levels = unique(likely_band), ordered = T))
+br.survey.ex <- br.survey %>% select(-band_id) %>% merge(individuals, by.x = "likely_band", by.y = "adult_color") %>%
+  arrange(desc(banding_date)) %>% mutate(likely_band = factor(likely_band, levels = unique(likely_band), ordered = T)) 
 
 # Re-sightings by period ----
 ggplot() + 
-  geom_tile(data = br.survey.ex, aes(x= as.factor(date), y = likely_band, fill = period), colour = "white")
+  geom_tile(data = br.survey.ex, aes(x= as.factor(date), y = likely_band, fill = period), colour = "white")+
+  facet_wrap(~sex)
 
 View(br.survey.ex)
 
@@ -170,24 +171,126 @@ View(br.survey.ex)
 # Lastly, we define the pre-breeding and postbreeding period before and after the first and last nest
 # any gaps that remain will be preparation
 
-# Now we can create the dataframe that will be used to store the information 
-states <- br.survey.ex %>% filter(sex =="F") %>%
-  mutate(survey.year = year(date)) %>% 
-  distinct(band_id, survey.year) %>%
-  rowwise() %>%
-  mutate(hatch_times = list(nests %>% filter(female_id == band_id,
-                                             year == survey.year) %>%
-                              pull(hatch_date)),
-        fates = list(nests %>% filter(female_id == band_id,
-                                             year == survey.year) %>%
-                              pull(fate)))
-  
+# first we will modify the nest database to calculate some breeding periods ----
+nests.br.periods <- nests %>% filter(year >= 2025) %>% group_by(nest_key) %>%
+  mutate(nestling_start = case_when(fate == "FL" ~ hatch_date,
+                                   fate == "AN" ~ hatch_date,
+                                   fate == "AE" ~ NA,
+                                   fate == "U" ~ NA),
+         nestling_end = case_when(fate == "FL" ~ fledge_date,
+                                         fate == "AN" ~ anytime(fail_date),
+                                         fate == "AE" ~ NA,
+                                         fate == "U" ~ NA),
+         prep_start = case_when(fate == "FL" ~ anytime(hatch_date) - days(17),
+                                     fate == "AN" ~ anytime(hatch_date) - days(17),
+                                     fate == "AE" ~ anytime(fail_date) - days(8),
+                                     fate == "U" ~ NA),
+         prep_end = case_when(fate == "FL" ~ anytime(hatch_date),
+                                     fate == "AN" ~ anytime(hatch_date),
+                                     fate == "AE" ~ anytime(fail_date),
+                                     fate == "U" ~ NA),
+         fledgling_start =  case_when(fate == "FL" ~ anytime(fledge_date)),
+         fledgling_end =  case_when(fate == "FL" ~ anytime(fledge_date) + days(13))) %>%
+  # next we pivot this 
+  pivot_longer(
+    cols = c(
+      nestling_start, nestling_end, prep_start,
+      fledgling_start, fledgling_end, prep_end,
+    ),
+    names_to = c("care_type", ".value"),
+    names_pattern = "(nestling|fledgling|prep)_(start|end)"
+  ) %>%
+  rename(
+    start_time = start,
+    end_time = end
+  ) %>%
+  mutate(
+    state = recode(
+      care_type,
+      nestling = "nestling care",
+      fledgling = "fledgling care",
+      prep = "preparation",
+    )
+  ) %>%
+  filter(!is.na(start_time) & !is.na(end_time) & ! is.na(female_id)) %>%
+  select(nest_key, male_id, male_color,female_id, female_color, state, start_time, end_time, year)
+         
 
-  
+# Now we determine which period each bird is in
+# Here we start with females 
+br.survey.states.f <- br.survey.ex %>%
+  rename("survey_start_time" = "start_time", 
+         "survey_end_time" = "end_time") %>%
+  filter(sex == "F") %>%
+  mutate(year = year(date)) %>%
+  left_join(
+    nests.br.periods,
+    by = join_by("band_id" == "female_id", "year" == "year"),
+                 relationship = "many-to-many") %>%
+  # Check if each female is in any of the breeding states 
+  mutate(in_state = !is.na(start_time) &
+      !is.na(end_time) &
+      date >= start_time &
+      date < end_time) %>%
+  # If a bird is in none of the states, we will give it the "other" state
+  group_by(band_id, date) %>%
+  filter(in_state == T | all(in_state == F)) %>%
+  mutate(state = ifelse(in_state == F, "other", state)) %>%
+  distinct(band_id, date, .keep_all = T) %>%
+ # then we can define pre-breeding and post-breeding states 
+  group_by(band_id, year) %>%
+  mutate(breeding.start = min(start_time),
+         breeding.end = max(end_time),
+         state = case_when(!is.na(breeding.start) & date <= breeding.start ~ "pre-breeding",
+                           !is.na(breeding.end) & date > breeding.end ~ "post-breeding",
+                           is.na(breeding.start) & yday(date) <= 193 ~ "pre-breeding",
+                           is.na(breeding.end) & yday(date) > 227 ~ "post-breeding",
+                           is.na(breeding.end) & yday(date) > 227 & yday(date) < 227 ~ "floater",
+                           .default = state)) %>%
+  arrange(band_id, date)
 
 
+br.survey.states.m <- br.survey.ex %>%
+  rename("survey_start_time" = "start_time", 
+         "survey_end_time" = "end_time") %>%
+  filter(sex == "M") %>%
+  mutate(year = year(date)) %>%
+  left_join(
+    nests.br.periods,
+    by = join_by("band_id" == "male_id", "year" == "year"),
+    relationship = "many-to-many") %>%
+  # Check if each female is in any of the breeding states 
+  mutate(in_state = !is.na(start_time) &
+           !is.na(end_time) &
+           date >= start_time &
+           date < end_time) %>%
+  # If a bird is in none of the states, we will give it the "other" state
+  group_by(band_id, date) %>%
+  filter(in_state == T | all(in_state == F)) %>%
+  mutate(state = ifelse(in_state == F, "other", state)) %>%
+  distinct(band_id, date, .keep_all = T) %>%
+  # then we can define pre-breeding and post-breeding states 
+  group_by(band_id, year) %>%
+  mutate(breeding.start = min(start_time),
+         breeding.end = max(end_time),
+         state = case_when(!is.na(breeding.start) & date <= breeding.start ~ "pre-breeding",
+                           !is.na(breeding.end) & date > breeding.end ~ "post-breeding",
+                           is.na(breeding.start) & yday(date) <= 193 ~ "pre-breeding",
+                           is.na(breeding.end) & yday(date) > 227 ~ "post-breeding",
+                           is.na(breeding.end) & yday(date) < 227 & yday(date) > 193 ~ "floater",
+                           .default = state)) %>%
+  arrange(band_id, date)
 
+# Merge the male and female resighting datasets with states 
+br.survey.states <- rbind(br.survey.states.m, br.survey.states.f)
 
+# Plot resightings with the new states ----
+ggplot() + 
+  geom_tile(data = br.survey.states, aes(x= as.factor(date), y = likely_band, fill = state), colour = "white") + 
+  facet_wrap(~sex)
+
+# Save the the processed data ---
+write_csv(br.survey.states, paste0(local.data,"/breeding_survival/SAVS_resightings_pro.csv"))
 
 
 
