@@ -5,9 +5,13 @@ library(tidyverse)
 library(sf)
 library(ggplot2)
 library(anytime)
+library(patchwork)
 
 # Path to Jelany's local data ---- 
 local.data <- "C:/Users/Jelan/OneDrive/Desktop/University/University of Guelph/PhD_Thesis/Data"
+
+# Path to folder for figures ----
+fig.dir <- "C:/Users/Jelan/OneDrive/Desktop/University/University of Guelph/PhD_Thesis/Chapter_3_breeding_survival/breeding_survival_figures"
 
 # Load all required data ----
 
@@ -113,7 +117,11 @@ br.survey <- bind_rows(br.survey, fall.survey)
 
 # Initial plot of the re sightings ----
 ggplot() + 
-  geom_tile(data = br.survey, aes(x= as.factor(date), y = likely_band, fill = period), colour = "white")
+  geom_tile(data = br.survey, aes(x= as.factor(date), y = likely_band, fill = period), colour = "white") + 
+  labs(fill = "Period") + 
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        text = element_text(size = 15))
 
 # We add individual data to the resightings dataset ----
 individuals <- read_csv(paste0(local.data,"/Kent_morpho_nest_ind/SAVS_dataset_backup_20260929/JD_individuals_20260929.csv"),
@@ -140,11 +148,15 @@ individuals <- read_csv(paste0(local.data,"/Kent_morpho_nest_ind/SAVS_dataset_ba
   filter(banding_date == max(banding_date))
 
 br.survey.ex <- br.survey %>% select(-band_id) %>% merge(individuals, by.x = "likely_band", by.y = "adult_color") %>%
-  arrange(desc(banding_date)) %>% mutate(likely_band = factor(likely_band, levels = unique(likely_band), ordered = T)) 
+  arrange(desc(banding_date)) %>% mutate(likely_band = factor(likely_band, levels = unique(likely_band), ordered = T)) %>% filter(sex %in% c("F", "M"))
 
 # Re-sightings by period ----
 ggplot() + 
-  geom_tile(data = br.survey.ex, aes(x= as.factor(date), y = likely_band, fill = period), colour = "white")+
+  geom_tile(data = br.survey.ex, aes(x= as.factor(date), y = likely_band, fill = period), colour = "white")+ 
+  labs(fill = "Period") + 
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        text = element_text(size = 15)) +
   facet_wrap(~sex)
 
 View(br.survey.ex)
@@ -232,22 +244,24 @@ br.survey.states.f <- br.survey.ex %>%
       !is.na(end_time) &
       date >= start_time &
       date < end_time) %>%
-  # If a bird is in none of the states, we will give it the "other" state
+  # If a bird is in none of the states, we will give it the "preparation" state
   group_by(band_id, date) %>%
   filter(in_state == T | all(in_state == F)) %>%
-  mutate(state = ifelse(in_state == F, "other", state)) %>%
+  mutate(state = ifelse(in_state == F, "preparation", state)) %>%
   distinct(band_id, date, .keep_all = T) %>%
  # then we can define pre-breeding and post-breeding states 
   group_by(band_id, year) %>%
   mutate(breeding.start = min(start_time),
          breeding.end = max(end_time),
-         state = case_when(!is.na(breeding.start) & date <= breeding.start ~ "pre-breeding",
-                           !is.na(breeding.end) & date > breeding.end ~ "post-breeding",
-                           is.na(breeding.start) & yday(date) <= 193 ~ "pre-breeding",
-                           is.na(breeding.end) & yday(date) > 227 ~ "post-breeding",
-                           is.na(breeding.end) & yday(date) > 227 & yday(date) < 227 ~ "floater",
+         state = case_when(!is.na(breeding.start) & date <= breeding.start ~ "prebreeding",
+                           !is.na(breeding.end) & date > breeding.end ~ "postbreeding",
+                           is.na(breeding.start) & yday(date) <= 193 ~ "prebreeding",
+                           is.na(breeding.end) & yday(date) > 227 ~ "postbreeding",
+                           is.na(breeding.end) & yday(date) > 227 & yday(date) < 227 ~ "preparation",
                            .default = state)) %>%
-  arrange(band_id, date)
+  arrange(band_id, date) %>%
+  mutate(period = factor(period, levels = c("prebreeding", "breeding", "postbreeding")),
+         state = factor(state, levels = c("prebreeding", "preparation", "nestling care", "fledgling care", "postbreeding")))
 
 
 br.survey.states.m <- br.survey.ex %>%
@@ -264,34 +278,91 @@ br.survey.states.m <- br.survey.ex %>%
            !is.na(end_time) &
            date >= start_time &
            date < end_time) %>%
-  # If a bird is in none of the states, we will give it the "other" state
+  # If a bird is in none of the states, we will give it the "preparation" state
   group_by(band_id, date) %>%
   filter(in_state == T | all(in_state == F)) %>%
-  mutate(state = ifelse(in_state == F, "other", state)) %>%
+  mutate(state = ifelse(in_state == F, "preparation", state)) %>%
   distinct(band_id, date, .keep_all = T) %>%
   # then we can define pre-breeding and post-breeding states 
   group_by(band_id, year) %>%
   mutate(breeding.start = min(start_time),
          breeding.end = max(end_time),
-         state = case_when(!is.na(breeding.start) & date <= breeding.start ~ "pre-breeding",
-                           !is.na(breeding.end) & date > breeding.end ~ "post-breeding",
-                           is.na(breeding.start) & yday(date) <= 193 ~ "pre-breeding",
-                           is.na(breeding.end) & yday(date) > 227 ~ "post-breeding",
-                           is.na(breeding.end) & yday(date) < 227 & yday(date) > 193 ~ "floater",
+         state = case_when(!is.na(breeding.start) & date <= breeding.start ~ "prebreeding",
+                           !is.na(breeding.end) & date > breeding.end ~ "postbreeding",
+                           is.na(breeding.start) & yday(date) <= 193 ~ "prebreeding",
+                           is.na(breeding.end) & yday(date) > 227 ~ "postbreeding",
+                           is.na(breeding.end) & yday(date) < 227 & yday(date) > 193 ~ "preparation",
                            .default = state)) %>%
-  arrange(band_id, date)
+  arrange(band_id, date)%>%
+  mutate(period = factor(period, levels = c("prebreeding", "breeding", "postbreeding")),
+         state = factor(state, levels = c("prebreeding", "preparation", "nestling care", "fledgling care", "postbreeding")))
+
 
 # Merge the male and female resighting datasets with states 
 br.survey.states <- rbind(br.survey.states.m, br.survey.states.f)
 
-# Plot resightings with the new states ----
-ggplot() + 
-  geom_tile(data = br.survey.states, aes(x= as.factor(date), y = likely_band, fill = state), colour = "white") + 
-  facet_wrap(~sex)
+# Plot resightings with the old periods ----
+male_res_per <- ggplot() + 
+  geom_tile(data = br.survey.states.m, aes(x= as.factor(date), y = likely_band, fill = period), colour = "white") +
+  scale_fill_manual(values = c("breeding" = "#E69F00", "prebreeding" ="#56B4E9", "postbreeding" = "#009E73"), 
+                           labels = c("breeding" = "Breeding", "prebreeding" = "Prebreeding",
+                                      "postbreeding" = "Postbreeding"))+
+  labs(fill = "Period",
+      title  = "(a) Male resightings") + 
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        text = element_text(size = 11))
+
+female_res_per <- ggplot() + 
+  geom_tile(data = br.survey.states.f, aes(x= as.factor(date), y = likely_band, fill = period), colour = "white") + 
+  scale_fill_manual(values = c("breeding" = "#E69F00", "prebreeding" ="#56B4E9", "postbreeding" = "#009E73"), 
+                    labels = c("breeding" = "Breeding", "prebreeding" = "Prebreeding",
+                               "postbreeding" = "Postbreeding"))+
+  
+  labs(fill = "Period",
+       title  = "(b) Female resightings") +
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        text = element_text(size = 11))
+
+res_periods <- male_res_per / female_res_per
+
+ggsave(plot = res_periods , device = "png" ,filename = "Resightings_period.png", path = fig.dir, dpi=300, units = "cm", width = 25, height = 10)
 
 # Save the the processed data ---
 write_csv(br.survey.states, paste0(local.data,"/breeding_survival/SAVS_resightings_pro.csv"))
 
+# Plot resightings with new states ----
+male_res_sta <- ggplot() + 
+  geom_tile(data = br.survey.states.m, aes(x= as.factor(date), y = likely_band, fill = state), colour = "white") + 
+  scale_fill_discrete(labels = c("breeding" = "Breeding", "prebreeding" = "Prebreeding",
+                               "postbreeding" = "Postbreeding", "fledgling care" = "Fledgling care",
+                               "nestling care" = "Nestling care",
+                               "preparation" = "Incubation\n & nest bulding"))+
+  labs(fill = "Period",
+       title  = "(a) Male resightings") + 
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        text = element_text(size = 11))
+
+female_res_sta <- ggplot() + 
+  geom_tile(data = br.survey.states.f, aes(x= as.factor(date), y = likely_band, fill = state), colour = "white") + 
+  scale_fill_discrete(labels = c("breeding" = "Breeding", "prebreeding" = "Prebreeding",
+                                 "postbreeding" = "Postbreeding", "fledgling care" = "Fledgling care",
+                                 "nestling care" = "Nestling care",
+                                 "preparation" = "Incubation\n & nest bulding"))+
+  labs(fill = "Period",
+       title  = "(b) Female resightings") +
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        text = element_text(size = 11))
+
+res_states<- male_res_sta / female_res_sta
+
+ggsave(plot = res_states , device = "png" ,filename = "Resightings_states.png", path = fig.dir, dpi=300, units = "cm", width = 25, height = 10)
+
+# Save the the processed data ---
+write_csv(br.survey.states, paste0(local.data,"/breeding_survival/SAVS_resightings_pro.csv"))
 
 
 
