@@ -13,6 +13,10 @@ library(tidyverse)
 library(MCMCvis)
 library(anytime)
 
+# Set a seed for reproducibility 
+mySeed <- 0
+set.seed(mySeed)
+
 # We will start by building a simpleCormack Jolly Seber model for Kent Island Savannah sparrows
 # We will not have distinct states for the breeding status of individuals 
 # But we will have time varying survival and detection probabilities 
@@ -25,17 +29,19 @@ local_data <- "C:/Users/Jelan/OneDrive/Desktop/University/University of Guelph/P
 detec_hist  <- read_csv(paste0(local.data,"/breeding_survival/SAVS_resightings_pro.csv"))
 
 ## Complete the data by adding non-detections as NA ----
-detec_hist <- detec_hist %>% complete(date, likely_band, fill = list(period = "Not seen")) %>%
+detec_hist_fill <- detec_hist %>% complete(date, nesting(likely_band), fill = list(period = "Not seen")) %>%
   group_by(date)%>%
-  fill(surveyor, start_time, end_time, precip, cloud_cover, wind, fog, Site, .direction = "downup") %>%
+  fill(surveyor, start_time, end_time, precip, cloud_cover, wind, fog, Site, .direction = "down") %>%
   ungroup() %>%
   # add 1s and 2s to indicate whether an individual was resighted 
   mutate(sighted = ifelse(is.na(band_as_seen), 1, 2))
 
 # We convert our data to a resighting matrix ---- 
-y <- detec_hist %>% select(date, sighted, likely_band) %>% group_by(date) %>% 
+y <- detec_hist_fill %>% select(date, sighted, likely_band) %>% group_by(date) %>% 
   distinct(likely_band, .keep_all = T) %>%
-  pivot_wider(names_from = date, values_from = sighted, id_cols = likely_band)
+  pivot_wider(names_from = date, values_from = sighted, id_cols = c(likely_band)) %>%
+  mutate(likely_band = factor(likely_band, levels = unique(detec_hist$likely_band))) %>%
+  arrange(likely_band)
 
 y <- y %>% select(-likely_band)%>% as.matrix()
 
@@ -260,4 +266,150 @@ df.surv.prob <- data_frame("days" = unique(detec_hist$date)[1:60], "survival.pro
 ggplot(data = df.surv.prob, aes(x = days, y = survival.prob)) + 
   geom_path() + 
   theme_bw()
+
+
+# Survival Model with time-varying survival and recapture probability and a sex covariate ----
+
+# We pull sex from the detec_hist dataset (here assuming the band colour columns are int he same order as they are in the reishting matrix)
+sex <- detec_hist %>% distinct(likely_band, sex) %>% filter(!is.na(sex)) %>%
+  mutate(sex = ifelse(sex == "M", 1, 2)) %>% pull(sex)
+
+hmm.phisexpt.ni <- nimbleCode({
+  
+  # Initial state probabilities
+  delta[1] <- 1
+  delta[2] <- 0
+  
+  # Interval-specific survival by sex
+  for (s in 1:2) {
+    for (t in 1:(T-1)) {
+      
+      phi[s,t] ~ dunif(0, 1)
+      
+      gamma[1,1,t,s] <- phi[s,t]
+      gamma[1,2,t,s] <- 1 - phi[s,t]
+      gamma[2,1,t,s] <- 0
+      gamma[2,2,t,s] <- 1
+      
+      # Detection probability
+      p[s,t] ~ dunif(0, 1)
+      
+      omega[1,1,t,s] <- 1 - p[s,t]
+      omega[1,2,t,s] <- p[s,t]
+      omega[2,1,t,s] <- 1
+      omega[2,2,t,s] <- 0
+    }
+  }
+  
+  # Likelihood
+  for (i in 1:N) {
+    
+    z[i,first[i]] ~ dcat(delta[1:2])
+    
+    for (j in (first[i]+1):T) {
+      
+      # State transition using the bird's sex
+      z[i,j] ~ dcat(
+        gamma[z[i,j-1], 1:2, j-1, sex[i]]
+      )
+      
+      # Observation model
+      y[i,j] ~ dcat(
+        omega[z[i,j], 1:2, j-1, sex[i]]
+      )
+    }
+  }
+})
+
+# We get the occasion of first capture for all individuals 
+first <- apply(y, 1, function(x) min(which(x ==2)))
+
+# Now we specify the constants 
+my.constants <- list(N = nrow(y),   # number of animals
+                     T = ncol(y),   # number of sampling occasions
+                     first = first, # first resighting occasion for each individual 
+                     sex = sex)
+
+# Put data in a list
+my.data <- list(y = y)
+
+# Now we write a function for the initial values 
+# here, for latent states, we assume that individuals are alive through the study period 
+zinits <- y # non-detection -> alive
+zinits[zinits == 2] <- 1 # dead -> alive
+initial.values <- function() {
+  list(
+    phi = matrix(
+      runif(2 * (my.constants$T - 1), 0.5, 0.99),
+      nrow = 2,
+      ncol = my.constants$T - 1
+    ),
+    p = matrix(
+      runif(2 * (my.constants$T - 1), 0, 1),
+      nrow = 2,
+      ncol = my.constants$T - 1
+    ),
+    z = zinits
+  )
+}
+
+# We specify the parameter sto monitor
+parameters.to.save <- c("phi", "p")
+
+# set MCM details 
+n.iter <- 5000
+n.burnin <- 1000
+n.chains <- 2
+
+# And we can run Nimble 
+mcmc.phisexpt.ni <- nimbleMCMC(code = hmm.phisexpt.ni,
+                          constants = my.constants,
+                          data = my.data,
+                          inits = initial.values,
+                          monitors = parameters.to.save,
+                          niter = n.iter,
+                          nburnin = n.burnin,
+                          nchains = n.chains)
+
+# summarize and visualize the MCMC output with the package MCMCvis
+mcmc.sm <- MCMCsummary(object = mcmc.phisexpt.ni, round = 4)
+mcmc.sm$param <- row.names(mcmc.sm)
+
+MCMCplot(object = mcmc.phisexpt.ni, 
+         params = "phi")
+
+# Extract model parameters for survival between intervals 
+phi.data <-  mcmc.sm %>%
+  filter(grepl("^p\\[", param)) %>%
+  extract(param, into = c("sex_index", "occasion"), 
+          regex = "p\\[(\\d+),\\s*(\\d+)\\]", convert = TRUE)%>%
+  mutate(sex = recode(as.character(sex_index),`1` = "Male",
+      `2` = "Female")) %>%
+  # We add back the dates 
+  mutate(date = rep(colnames(y), each = 2)[-c(1, 2)],
+         date = anytime(date),
+         survey.year = year(date)) %>%
+  # we add back the time intervals 
+  mutate(delta =  rep(delta.days, each = 2)) %>%
+  # We scale the survival by the time intervals 
+ mutate(daily.phi =  mean ^ (1 / delta))
+  
+# Plot survival between intervals 
+phi.plot <- ggplot(data = phi.data, aes(x = date, y = mean, colour = sex)) + 
+  geom_point() + 
+  geom_path() + 
+  labs(y = "survival probability",  x = "Survey date") + 
+  geom_errorbar(aes(ymin = `2.5%`, ymax = `97.5%`, colour = sex), alpha = 0.3) + 
+  scale_y_continuous(limits = c(0, 1)) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_line(colour = "darkgrey"),
+        panel.background = element_blank(), panel.border = element_rect(colour = "black", fill = NA))
+
+ggsave(plot = phi.plot , device = "png" ,filename = "Survival_between_surveys.png", path = fig.dir, dpi=300, units = "cm", width = 25, height = 10)
+
+phi.plot.scaled <- ggplot(data = phi.data, aes(x = date, y = daily.phi, colour = sex)) + 
+  scale_y_continuous(limits = c(0, 1)) +
+  geom_point() + 
+  geom_path() + 
+  facet_wrap(~ sex + survey.year, scales = "free")
+
 
