@@ -226,15 +226,35 @@ nests.br.periods <- nests %>% filter(year >= 2025) %>% group_by(nest_key) %>%
   ) %>%
   filter(!is.na(start_time) & !is.na(end_time) & ! is.na(female_id)) %>%
   select(nest_key, male_id, male_color,female_id, female_color, state, start_time, end_time, year)
-         
 
-# Now we determine which period each bird is in
+# Save breeding state data ----
+write_csv(nests.br.periods, paste0(local.data,"/breeding_survival/nesting_states.csv"))
+
+# We can apply this state information to the resighting survey data ----
+
+# We estimate the timing of the pre-breeding state
+# The length of the post0breeding state is not recoverable because we do not know when and if individuals departed Kent Island for fall migration 
+
+# We will expand the dataset (with complete())and assign states even to dates when no survey attempts where made 
+# Then we can calculate the amount of time spent in each stage. 
+
 # Here we start with females 
 br.survey.states.f <- br.survey.ex %>%
   rename("survey_start_time" = "start_time", 
          "survey_end_time" = "end_time") %>%
   filter(sex == "F") %>%
   mutate(year = year(date)) %>%
+  # we expand the resighting dataset to include even days when surveys were not conducted. 
+  # This is to ensure that we can make daily state assignments
+  group_by(band_id, year) %>%
+  mutate(date = as.Date(date)) %>%
+  complete(date = seq.Date(min(date), max(date), by = "day"), nesting(likely_band), fill = list(period = "Not seen or surveyed")) %>%
+  group_by(date)%>%
+  fill(survey_start_time, survey_end_time, surveyor, precip, cloud_cover, wind, fog, Site, .direction = "down") %>%
+  ungroup() %>%
+  # add 1s and 2s to indicate whether an individual was resighted 
+  mutate(sighted = ifelse(is.na(band_as_seen), 1, 2)) %>%
+  # merge with the nesting peruiod data
   left_join(
     nests.br.periods,
     by = join_by("band_id" == "female_id", "year" == "year"),
@@ -261,14 +281,32 @@ br.survey.states.f <- br.survey.ex %>%
                            .default = state)) %>%
   arrange(band_id, date) %>%
   mutate(period = factor(period, levels = c("prebreeding", "breeding", "postbreeding")),
-         state = factor(state, levels = c("prebreeding", "preparation", "nestling care", "fledgling care", "postbreeding")))
+         state = factor(state, levels = c("prebreeding", "preparation", "nestling care", "fledgling care", "postbreeding"))) %>%
+  # lastly, we will modify the "start-time" and "end_time" column so they include updated information 
+  group_by(band_id) %>%
+  mutate(state_id = cumsum(state != lag(state, default = first(state)))) %>%
+  group_by(band_id, state_id) %>%
+  mutate(start_time = min(date),
+         end_time = max(date)) %>%
+  ungroup()
 
-
+# Now we can assign states to males
 br.survey.states.m <- br.survey.ex %>%
   rename("survey_start_time" = "start_time", 
          "survey_end_time" = "end_time") %>%
   filter(sex == "M") %>%
   mutate(year = year(date)) %>%
+  # we expand the resighting dataset to include even days when surveys were not conducted. 
+  # This is to ensure that we can make daily state assignments
+  group_by(band_id, year) %>%
+  mutate(date = as.Date(date)) %>%
+  complete(date = seq.Date(min(date), max(date), by = "day"), nesting(likely_band), fill = list(period = "Not seen or surveyed")) %>%
+  group_by(date)%>%
+  fill(survey_start_time, survey_end_time, surveyor, precip, cloud_cover, wind, fog, Site, .direction = "down") %>%
+  ungroup() %>%
+  # add 1s and 2s to indicate whether an individual was resighted 
+  mutate(sighted = ifelse(is.na(band_as_seen), 1, 2)) %>%
+  # merge with the nesting peruiod data
   left_join(
     nests.br.periods,
     by = join_by("band_id" == "male_id", "year" == "year"),
@@ -291,15 +329,21 @@ br.survey.states.m <- br.survey.ex %>%
                            !is.na(breeding.end) & date > breeding.end ~ "postbreeding",
                            is.na(breeding.start) & yday(date) <= 193 ~ "prebreeding",
                            is.na(breeding.end) & yday(date) > 227 ~ "postbreeding",
-                           is.na(breeding.end) & yday(date) < 227 & yday(date) > 193 ~ "preparation",
+                           is.na(breeding.end) & yday(date) > 227 & yday(date) < 227 ~ "preparation",
                            .default = state)) %>%
-  arrange(band_id, date)%>%
+  arrange(band_id, date) %>%
   mutate(period = factor(period, levels = c("prebreeding", "breeding", "postbreeding")),
-         state = factor(state, levels = c("prebreeding", "preparation", "nestling care", "fledgling care", "postbreeding")))
-
+         state = factor(state, levels = c("prebreeding", "preparation", "nestling care", "fledgling care", "postbreeding"))) %>%
+  # lastly, we will modify the "start-time" and "end_time" column so they include updated information 
+  group_by(band_id) %>%
+  mutate(state_id = cumsum(state != lag(state, default = first(state)))) %>%
+  group_by(band_id, state_id) %>%
+  mutate(start_time = min(date),
+         end_time = max(date)) %>%
+  ungroup()
 
 # Merge the male and female resighting datasets with states 
-br.survey.states <- rbind(br.survey.states.m, br.survey.states.f)
+br.survey.states <- bind_rows(br.survey.states.m, br.survey.states.f)
 
 # Plot resightings with the old periods ----
 male_res_per <- ggplot() + 
